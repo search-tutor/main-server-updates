@@ -7,11 +7,7 @@ const port = process.env.PORT || 4000;
 
 // middleware
 const allowedOrigins = [
-<<<<<<< HEAD
-  'http://localhost:5173',
-=======
   //'http://localhost:5173',
->>>>>>> f8d15577e48f8157534173135403f4c9330cd438
   'https://searchtutorbd.com'
   // আপনি এখানে আপনার অন্যান্য ফ্রন্টএন্ড URL যোগ করতে পারেন
 ];
