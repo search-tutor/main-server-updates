@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "./index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "rewrites": [
+    {
+<<<<<<< HEAD
+      "src": "/(.*)",
+      "dest": "index.js"
+=======
+      "source": "/firebase-messaging-sw.js",
+      "destination": "/firebase-messaging-sw.js"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.js"
+>>>>>>> f8d15577e48f8157534173135403f4c9330cd438
+    }
+  ]
+}
