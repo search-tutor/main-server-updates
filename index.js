@@ -7,7 +7,7 @@ const port = process.env.PORT || 4000;
 
 // middleware
 const allowedOrigins = [
-  //'http://localhost:5173',
+  'http://localhost:5173',
   'https://searchtutorbd.com'
   // আপনি এখানে আপনার অন্যান্য ফ্রন্টএন্ড URL যোগ করতে পারেন
 ];
@@ -25,6 +25,22 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+
+app.post("/jwt", (req, res) => {
+  const user = req.body;
+
+  if (!user || !user.uid || !user.email) {
+    return res
+      .status(400)
+      .send({ success: false, error: "UID and email are required" });
+  }
+
+  const token = jwt.sign(user, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN,
+  });
+
+  res.send({ success: true, token });
+});
 
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
@@ -1696,23 +1712,6 @@ async function run() {
       }
     });
 
-    app.post("/jwt", (req, res) => {
-      const user = req.body;
-
-      if (!user || !user.uid || !user.email) {
-        return res
-          .status(400)
-          .send({ success: false, error: "UID and email are required" });
-      }
-
-      const token = jwt.sign(user, process.env.JWT_SECRET, {
-        expiresIn: process.env.JWT_EXPIRES_IN,
-      });
-
-      // cookie set করো না, শুধু token response দাও
-      res.send({ success: true, token });
-    });
-
     function verifyToken(req, res, next) {
       // Authorization header থেকে token নাও
       const authHeader = req.headers.authorization;
@@ -1742,12 +1741,20 @@ async function run() {
     // await client.close();
   }
 }
-run().catch(console.dir);
 
 app.get("/", (req, res) => {
   res.send("search teacher is live");
 });
+// app.listen(port, () => {
+//   console.log(`search teacher is sitting on port ${port}`);
+// });
 
-app.listen(port, () => {
-  console.log(`search teacher is sitting on port ${port}`);
+const ready = run().catch((error) => {
+  console.error("Failed to initialize application:", error);
+  throw error;
 });
+
+module.exports = async (req, res) => {
+  await ready;
+  return app(req, res);
+};
