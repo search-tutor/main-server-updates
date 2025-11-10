@@ -3,7 +3,27 @@ const express = require("express");
 const app = express();
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
+const admin = require("firebase-admin");
 const port = process.env.PORT || 4000;
+
+// Initialize Firebase Admin SDK
+let isFirebaseInitialized = false;
+try {
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+  
+  if (serviceAccount.project_id) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+    isFirebaseInitialized = true;
+    console.log("✅ Firebase Admin initialized successfully");
+  } else {
+    console.log("⚠️ Firebase Admin not initialized - service account not found");
+    console.log("💡 Tip: Add FIREBASE_SERVICE_ACCOUNT to .env file");
+  }
+} catch (error) {
+  console.error("❌ Error initializing Firebase Admin:", error.message);
+}
 
 // middleware
 const allowedOrigins = [
@@ -70,6 +90,135 @@ async function run() {
     const jobsCollection = db.collection("jobs");
     const applicationsCollection = db.collection("applications");
     const hireRequestsCollection = db.collection("hireRequests");
+    const notificationTokensCollection = db.collection("notificationTokens"); // NEW: Persistent tokens
+
+    // Create indexes for tokens collection
+    await notificationTokensCollection.createIndexes([
+      { key: { fcmToken: 1 }, unique: true },
+      { key: { deviceId: 1 } },
+      { key: { city: 1 } },
+      { key: { userId: 1 } },
+      { key: { lastActive: 1 } },
+      { key: { isActive: 1 } }
+    ]);
+    console.log("✅ Notification tokens collection indexes created");
+
+    // ===========================
+    // 🔔 PUSH NOTIFICATION HELPER
+    // ===========================
+    async function sendPushNotifications(users, job) {
+      try {
+        // Check if Firebase Admin is initialized
+        if (!isFirebaseInitialized) {
+          console.log("⚠️ Push notifications disabled - Firebase Admin not initialized");
+          console.log("💡 Add FIREBASE_SERVICE_ACCOUNT to .env to enable push notifications");
+          return { success: 0, failed: 0, skipped: users.length };
+        }
+
+        if (!users || users.length === 0) {
+          console.log("📭 No users to send notifications to");
+          return { success: 0, failed: 0 };
+        }
+
+        // Filter users who have FCM tokens
+        const usersWithTokens = users.filter(u => u.fcmToken);
+        
+        if (usersWithTokens.length === 0) {
+          console.log("📭 No users with FCM tokens found");
+          return { success: 0, failed: 0 };
+        }
+
+        const tokens = usersWithTokens.map(u => u.fcmToken);
+
+        // Prepare message payload (optimized for all devices)
+        const messagePayload = {
+          notification: {
+            title: `🎓 New Job in ${job.city}!`,
+            body: `${job.title} - Salary: ${job.salary} BDT/month`,
+          },
+          data: {
+            jobId: job.jobId.toString(),
+            jobObjectId: job._id.toString(),
+            city: job.city,
+            salary: job.salary.toString(),
+            click_action: `/job/${job._id}`,
+          },
+          // Android specific options
+          android: {
+            priority: 'high',
+            notification: {
+              sound: 'default',
+              channelId: 'job-notifications',
+              priority: 'high',
+              defaultSound: true,
+              defaultVibrateTimings: true,
+            }
+          },
+          // Apple specific options  
+          apns: {
+            payload: {
+              aps: {
+                sound: 'default',
+                badge: 1,
+              }
+            }
+          },
+          // Web push options
+          webpush: {
+            notification: {
+              icon: '/logo.png',
+              badge: '/logo.png',
+              vibrate: [200, 100, 200],
+              requireInteraction: false, // Auto-dismiss after timeout
+              tag: 'job-notification',
+              renotify: true,
+            },
+            fcmOptions: {
+              link: `/job/${job._id}`
+            }
+          }
+        };
+
+        // Send notifications to each token with device-specific handling
+        let successCount = 0;
+        let failureCount = 0;
+        const failedTokens = [];
+
+        for (let i = 0; i < usersWithTokens.length; i++) {
+          try {
+            const user = usersWithTokens[i];
+            const message = {
+              ...messagePayload,
+              token: user.fcmToken,
+            };
+            
+            await admin.messaging().send(message);
+            successCount++;
+            console.log(`✅ Sent to ${user.deviceType || 'unknown'} device (${i + 1}/${usersWithTokens.length})`);
+          } catch (error) {
+            failureCount++;
+            failedTokens.push(usersWithTokens[i].fcmToken);
+            console.log(`❌ Failed to send to token ${i + 1}:`, error.code || error.message);
+          }
+        }
+        
+        console.log(`✅ Notifications sent: ${successCount} success, ${failureCount} failed`);
+        
+        // Remove invalid tokens from database
+        if (failedTokens.length > 0) {
+          await usersCollection.updateMany(
+            { fcmToken: { $in: failedTokens } },
+            { $unset: { fcmToken: "" } }
+          );
+          console.log(`🗑️ Removed ${failedTokens.length} invalid tokens`);
+        }
+
+        return { success: successCount, failed: failureCount };
+      } catch (error) {
+        console.error("❌ Error sending push notifications:", error);
+        return { success: 0, failed: users.length, error: error.message };
+      }
+    }
 
     // GET route to fetch all users
     // app.get("/users", async (req, res) => {
@@ -82,7 +231,7 @@ async function run() {
     //   }
     // });
 
-    app.get("/users", verifyToken, async (req, res) => {
+    app.get("/users", async (req, res) => {
       try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 12;
@@ -207,7 +356,8 @@ async function run() {
 
         const existingUser = await usersCollection.findOne({ uid });
         if (existingUser) {
-          return res.status(400).send({ error: "User already exists" });
+          // If user exists, send back their data with a 200 status
+          return res.status(200).send(existingUser);
         }
 
         const newUser = {
@@ -238,6 +388,190 @@ async function run() {
       } catch (error) {
         console.error("Error saving user:", error);
         res.status(500).send({ error: "Failed to save user" });
+      }
+    });
+
+
+    // ===========================
+    // 🔔 ANONYMOUS TOKEN REGISTRATION
+    // ===========================
+    app.post("/notification-tokens/register", async (req, res) => {
+      try {
+        const { fcmToken, deviceId, city, deviceType, userAgent } = req.body;
+
+        if (!fcmToken || !deviceId) {
+          return res.status(400).send({ 
+            success: false, 
+            error: "FCM token and device ID are required" 
+          });
+        }
+
+        // Check if token already exists
+        const existingToken = await notificationTokensCollection.findOne({ fcmToken });
+
+        if (existingToken) {
+          // Update existing token
+          await notificationTokensCollection.updateOne(
+            { fcmToken },
+            { 
+              $set: { 
+                city: city || existingToken.city,
+                deviceType: deviceType || existingToken.deviceType,
+                userAgent: userAgent || existingToken.userAgent,
+                lastActive: new Date(),
+                isActive: true
+              } 
+            }
+          );
+
+          console.log(`✅ Updated anonymous token for device: ${deviceId}`);
+          return res.status(200).send({ 
+            success: true, 
+            message: "Token updated successfully",
+            tokenId: existingToken._id
+          });
+        }
+
+        // Create new anonymous token
+        const newToken = {
+          fcmToken,
+          deviceId,
+          userId: null, // Anonymous - no user linked yet
+          city: city || null,
+          deviceType: deviceType || 'unknown',
+          userAgent: userAgent || null,
+          isAnonymous: true,
+          isActive: true,
+          preferences: {
+            cities: city ? [city] : [],
+            categories: []
+          },
+          createdAt: new Date(),
+          lastActive: new Date()
+        };
+
+        const result = await notificationTokensCollection.insertOne(newToken);
+
+        console.log(`✅ Registered anonymous token for city: ${city || 'unspecified'}`);
+        res.status(201).send({ 
+          success: true, 
+          message: "Anonymous token registered successfully",
+          tokenId: result.insertedId
+        });
+      } catch (error) {
+        console.error("❌ Error registering anonymous token:", error);
+        res.status(500).send({ 
+          success: false, 
+          error: "Failed to register token" 
+        });
+      }
+    });
+
+
+    // ===========================
+    // 🔔 SAVE FCM TOKEN (LOGIN)
+    // ===========================
+    app.post("/users/:uid/fcm-token", async (req, res) => {
+      try {
+        const { uid } = req.params;
+        const { fcmToken, deviceType, userAgent, deviceId } = req.body;
+
+        if (!uid || !fcmToken) {
+          return res.status(400).send({ 
+            success: false, 
+            error: "UID and FCM token are required" 
+          });
+        }
+
+        // Get user info for city
+        const user = await usersCollection.findOne({ uid });
+        if (!user) {
+          return res.status(404).send({ 
+            success: false, 
+            error: "User not found" 
+          });
+        }
+
+        // Update or create token in notificationTokens collection
+        const existingToken = await notificationTokensCollection.findOne({ fcmToken });
+
+        if (existingToken) {
+          // Link existing anonymous token to user
+          await notificationTokensCollection.updateOne(
+            { fcmToken },
+            { 
+              $set: { 
+                userId: uid,
+                city: user.city || existingToken.city,
+                deviceType: deviceType || existingToken.deviceType,
+                userAgent: userAgent || existingToken.userAgent,
+                isAnonymous: false,
+                lastActive: new Date(),
+                isActive: true
+              } 
+            }
+          );
+          console.log(`✅ Linked anonymous token to user: ${uid}`);
+        } else {
+          // Create new token entry
+          await notificationTokensCollection.insertOne({
+            fcmToken,
+            deviceId: deviceId || null,
+            userId: uid,
+            city: user.city,
+            deviceType: deviceType || 'unknown',
+            userAgent: userAgent || null,
+            isAnonymous: false,
+            isActive: true,
+            preferences: {
+              cities: user.city ? [user.city] : [],
+              categories: []
+            },
+            createdAt: new Date(),
+            lastActive: new Date()
+          });
+          console.log(`✅ Created new token for user: ${uid}`);
+        }
+
+        // Also update user collection (backward compatibility)
+        const updateData = {
+          fcmToken, 
+          lastTokenUpdate: new Date(),
+          notificationEnabled: true
+        };
+
+        // Store device info for better targeting
+        if (deviceType) {
+          updateData.deviceType = deviceType;
+        }
+        if (userAgent) {
+          updateData.lastUserAgent = userAgent;
+        }
+
+        const result = await usersCollection.updateOne(
+          { uid },
+          { $set: updateData }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ 
+            success: false, 
+            error: "User not found" 
+          });
+        }
+
+        console.log(`✅ FCM token saved for user: ${uid} (${deviceType || 'unknown device'})`);
+
+        res.status(200).send({ 
+          success: true, 
+          message: "FCM token saved successfully" 
+        });
+      } catch (error) {
+        console.error("❌ Error saving FCM token:", error);
+        res.status(500).send({ 
+          success: false, 
+          error: "Failed to save FCM token" 
+        });
       }
     });
 
@@ -1209,6 +1543,7 @@ async function run() {
           studentsNumber,
           tutoringTime,
           guardianNumber,
+          postedBy,
         } = req.body;
 
         const requiredFields = [
@@ -1274,9 +1609,82 @@ async function run() {
           city,
           date: postedDate,
           dateObj,
+          postedBy, // Add admin info
         };
 
         const result = await jobsCollection.insertOne(newJob);
+
+        // ===========================
+        // 🔔 SEND PUSH NOTIFICATIONS (Including Anonymous Users)
+        // ===========================
+        try {
+          // Find ONLY logged-in tutors with FCM tokens (no anonymous users)
+          const matchingTokens = await notificationTokensCollection
+            .find({ 
+              city: city,
+              fcmToken: { $exists: true },
+              isActive: true,
+              userId: { $exists: true, $ne: null },  // Must have userId (logged in)
+              isAnonymous: false  // Not anonymous
+            })
+            .toArray();
+
+          // Also check users collection for backward compatibility
+          const matchingTutors = await usersCollection
+            .find({ 
+              accountType: "tutor",
+              city: city,
+              fcmToken: { $exists: true },
+              notificationEnabled: { $ne: false }
+            })
+            .toArray();
+
+          // Combine both sources and remove duplicates
+          const allTokensMap = new Map();
+          
+          // Add from notificationTokens collection
+          matchingTokens.forEach(token => {
+            allTokensMap.set(token.fcmToken, {
+              fcmToken: token.fcmToken,
+              deviceType: token.deviceType,
+              userId: token.userId
+            });
+          });
+
+          // Add from users collection (if not already in map)
+          matchingTutors.forEach(tutor => {
+            if (!allTokensMap.has(tutor.fcmToken)) {
+              allTokensMap.set(tutor.fcmToken, {
+                fcmToken: tutor.fcmToken,
+                deviceType: tutor.deviceType,
+                userId: tutor.uid
+              });
+            }
+          });
+
+          const allRecipients = Array.from(allTokensMap.values());
+
+          if (allRecipients.length > 0) {
+            console.log(`📤 Sending notifications to ${allRecipients.length} logged tutors in ${city}`);
+            
+            // Add the _id to newJob for notification
+            newJob._id = result.insertedId;
+            
+            // Send notifications (non-blocking)
+            sendPushNotifications(allRecipients, newJob)
+              .then(notifResult => {
+                console.log(`✅ Notification result: ${notifResult.success} sent, ${notifResult.failed} failed`);
+              })
+              .catch(err => {
+                console.error("❌ Notification error:", err);
+              });
+          } else {
+            console.log(`📭 No users found in ${city} with FCM tokens`);
+          }
+        } catch (notifError) {
+          console.error("❌ Error in notification process:", notifError);
+          // Don't fail the job post if notification fails
+        }
 
         res.status(201).send({
           success: true,
@@ -1636,46 +2044,186 @@ async function run() {
     });
 
 
+    // GET: Get selected tutors with full details
+    app.get("/selected-tutors", verifyToken, async (req, res) => {
+      try {
+        const selectedApplications = await applicationsCollection.aggregate([
+          {
+            $match: { status: "selected" }
+          },
+          {
+            $addFields: {
+              jobIdObj: { $toObjectId: "$jobId" }
+            }
+          },
+          {
+            $lookup: {
+              from: "users",
+              localField: "userId",
+              foreignField: "uid",
+              as: "userDetails"
+            }
+          },
+          {
+            $lookup: {
+              from: "jobs",
+              localField: "jobIdObj",
+              foreignField: "_id",
+              as: "jobDetails"
+            }
+          },
+          {
+            $unwind: "$userDetails"
+          },
+          {
+            $unwind: "$jobDetails"
+          },
+          {
+            $sort: { appliedAt: -1 }
+          }
+        ]).toArray();
+
+        res.json({
+          success: true,
+          applications: selectedApplications
+        });
+      } catch (error) {
+        console.error("Error fetching selected tutors:", error);
+        res.status(500).json({ success: false, error: "Server error" });
+      }
+    });
+
     // GET: Get all applications with user and job info for admin
     app.get("/applications", verifyToken, async (req, res) => {
       try {
-        const allApplications = await applicationsCollection
-          .aggregate([
-            {
-              $match: {
-                jobId: { $regex: /^[0-9a-fA-F]{24}$/ },
-              },
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const search = req.query.search;
+        const skip = (page - 1) * limit;
+    
+        let aggregationPipeline = [];
+    
+        // Stage 1: Match jobs based on search criteria
+        if (search) {
+          aggregationPipeline.push({
+            $match: {
+              $or: [
+                { title: { $regex: search, $options: "i" } },
+                { guardianNumber: { $regex: search, $options: "i" } },
+                {
+                  $expr: {
+                    $regexMatch: {
+                      input: { $toString: "$jobId" },
+                      regex: search,
+                      options: "i",
+                    },
+                  },
+                },
+              ],
             },
-            {
-              $addFields: {
-                jobIdObj: { $toObjectId: "$jobId" },
+          });
+        }
+    
+        // Stage 2: Sort jobs (e.g., by creation date)
+        aggregationPipeline.push({
+          $sort: { _id: -1 },
+        });
+    
+        // Stage 3: Lookup applications for each job
+        aggregationPipeline.push({
+          $lookup: {
+            from: "applications",
+            let: { jobIdStr: { $toString: "$_id" } },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $eq: ["$jobId", "$$jobIdStr"],
+                  },
+                },
               },
-            },
-            {
-              $lookup: {
-                from: "jobs",
-                localField: "jobIdObj",
-                foreignField: "_id",
-                as: "jobDetails",
-              },
-            },
-            { $unwind: "$jobDetails" },
-            {
-              $lookup: {
-                from: "users",
-                localField: "userId",
-                foreignField: "uid",
-                as: "userDetails",
-              },
-            },
-            { $unwind: "$userDetails" },
-            { $sort: { _id: -1 } },
-          ])
-          .toArray();
-
-        res.json(allApplications);
+              { $count: "count" },
+            ],
+            as: "applicationData",
+          },
+        });
+    
+        // Stage 4: Project the final shape
+        aggregationPipeline.push({
+          $project: {
+            _id: 1,
+            jobTitle: "$title",
+            guardianNumber: "$guardianNumber",
+            jobId: "$jobId",
+            applicationCount: { $ifNull: [{ $first: "$applicationData.count" }, 0] },
+          },
+        });
+    
+        // Stage 5: Facet for pagination and total count
+        aggregationPipeline.push({
+          $facet: {
+            paginatedResults: [{ $skip: skip }, { $limit: limit }],
+            totalCount: [{ $count: "count" }],
+          },
+        });
+    
+        // Execute the aggregation on the 'jobs' collection
+        const result = await jobsCollection.aggregate(aggregationPipeline).toArray();
+    
+        const applications = result[0].paginatedResults;
+        const totalCount = result[0].totalCount.length > 0 ? result[0].totalCount[0].count : 0;
+        const totalPages = Math.ceil(totalCount / limit);
+    
+        res.json({
+          applications,
+          totalPages,
+        });
+    
       } catch (error) {
         console.error("Error fetching applications:", error);
+        res.status(500).json({ error: "Server error" });
+      }
+    });
+
+    app.get("/applications/:jobId", verifyToken, async (req, res) => {
+      try {
+        const jobId = req.params.jobId;
+
+        // Find the job by numeric jobId
+        const job = await jobsCollection.findOne({ jobId: parseInt(jobId) });
+        if (!job) {
+          return res.status(404).json({ error: "Job not found" });
+        }
+
+        const applications = await applicationsCollection.aggregate([
+          {
+            $match: {
+              jobId: job._id.toString() // Match by the ObjectId of the job
+            }
+          },
+          {
+            $lookup: {
+              from: "users",
+              localField: "userId",
+              foreignField: "uid",
+              as: "userDetails"
+            }
+          },
+          {
+            $unwind: "$userDetails"
+          },
+          {
+            $sort: { _id: -1 }
+          }
+        ]).toArray();
+
+        res.json({
+          job,
+          applications
+        });
+
+      } catch (error) {
+        console.error("Error fetching applications by jobId:", error);
         res.status(500).json({ error: "Server error" });
       }
     });
@@ -1745,9 +2293,9 @@ async function run() {
 app.get("/", (req, res) => {
   res.send("search teacher is live");
 });
-// app.listen(port, () => {
-//   console.log(`search teacher is sitting on port ${port}`);
-// });
+app.listen(port, () => {
+  console.log(`search teacher is sitting on port ${port}`);
+});
 
 const ready = run().catch((error) => {
   console.error("Failed to initialize application:", error);
