@@ -4,6 +4,7 @@ const app = express();
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const admin = require("firebase-admin");
+const fetch = require("node-fetch");
 const port = process.env.PORT || 4000;
 
 // Initialize Firebase Admin SDK
@@ -2555,48 +2556,49 @@ app.get("/check-notification-status/:userId", async (req, res) => {
   }
 });
 
-// Get current logged user info (no need for userId in URL)
-app.get("/my-notification-status", verifyJWT, async (req, res) => {
-  try {
-    const userId = req.decoded.uid;
+// Commented out - requires verifyJWT middleware
+// // Get current logged user info (no need for userId in URL)
+// app.get("/my-notification-status", verifyJWT, async (req, res) => {
+//   try {
+//     const userId = req.decoded.uid;
 
-    // Check in notificationTokens collection
-    const tokens = await notificationTokensCollection
-      .find({ userId: userId })
-      .toArray();
+//     // Check in notificationTokens collection
+//     const tokens = await notificationTokensCollection
+//       .find({ userId: userId })
+//       .toArray();
 
-    // Check in users collection
-    const user = await usersCollection.findOne({ uid: userId });
+//     // Check in users collection
+//     const user = await usersCollection.findOne({ uid: userId });
 
-    res.json({
-      success: true,
-      userId: userId,
-      userName: user?.name || 'Unknown',
-      tokensInCollection: tokens.length,
-      tokens: tokens.map(t => ({
-        fcmToken: t.fcmToken.substring(0, 20) + '...',
-        city: t.city,
-        deviceType: t.deviceType,
-        isActive: t.isActive,
-        isAnonymous: t.isAnonymous,
-        createdAt: t.createdAt
-      })),
-      userProfile: user ? {
-        city: user.city,
-        accountType: user.accountType,
-        notificationEnabled: user.notificationEnabled,
-        hasFCMToken: !!user.fcmToken
-      } : null
-    });
+//     res.json({
+//       success: true,
+//       userId: userId,
+//       userName: user?.name || 'Unknown',
+//       tokensInCollection: tokens.length,
+//       tokens: tokens.map(t => ({
+//         fcmToken: t.fcmToken.substring(0, 20) + '...',
+//         city: t.city,
+//         deviceType: t.deviceType,
+//         isActive: t.isActive,
+//         isAnonymous: t.isAnonymous,
+//         createdAt: t.createdAt
+//       })),
+//       userProfile: user ? {
+//         city: user.city,
+//         accountType: user.accountType,
+//         notificationEnabled: user.notificationEnabled,
+//         hasFCMToken: !!user.fcmToken
+//       } : null
+//     });
 
-  } catch (error) {
-    console.error("❌ Error checking notification status:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+//   } catch (error) {
+//     console.error("❌ Error checking notification status:", error);
+//     res.status(500).json({
+//       success: false,
+//       error: error.message
+//     });
+//   }
+// });
 
 app.listen(port, () => {
   console.log(`search teacher is sitting on port ${port}`);
