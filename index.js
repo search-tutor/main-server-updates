@@ -2369,6 +2369,48 @@ app.post("/test-notification", async (req, res) => {
   }
 });
 
+// Debug endpoint - Check user's notification status
+app.get("/check-notification-status/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Check in notificationTokens collection
+    const tokens = await notificationTokensCollection
+      .find({ userId: userId })
+      .toArray();
+
+    // Check in users collection
+    const user = await usersCollection.findOne({ uid: userId });
+
+    res.json({
+      success: true,
+      userId: userId,
+      tokensInCollection: tokens.length,
+      tokens: tokens.map(t => ({
+        fcmToken: t.fcmToken.substring(0, 20) + '...',
+        city: t.city,
+        deviceType: t.deviceType,
+        isActive: t.isActive,
+        isAnonymous: t.isAnonymous,
+        createdAt: t.createdAt
+      })),
+      userProfile: user ? {
+        city: user.city,
+        accountType: user.accountType,
+        notificationEnabled: user.notificationEnabled,
+        hasFCMToken: !!user.fcmToken
+      } : null
+    });
+
+  } catch (error) {
+    console.error("❌ Error checking notification status:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`search teacher is sitting on port ${port}`);
 });
