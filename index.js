@@ -69,6 +69,13 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 // const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.mjmwf3r.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`
 const uri = process.env.URI
 
+// Global collections - will be initialized in run()
+let usersCollection;
+let tuitionRequestsCollection;
+let jobsCollection;
+let applicationsCollection;
+let hireRequestsCollection;
+let notificationTokensCollection;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -85,12 +92,12 @@ async function run() {
     await client.connect(); // Explicitly connect to MongoDB
 
     const db = client.db("searchTeacherDb"); // Use your DB name
-    const usersCollection = db.collection("users");
-    const tuitionRequestsCollection = db.collection("tuitionRequests");
-    const jobsCollection = db.collection("jobs");
-    const applicationsCollection = db.collection("applications");
-    const hireRequestsCollection = db.collection("hireRequests");
-    const notificationTokensCollection = db.collection("notificationTokens"); // NEW: Persistent tokens
+    usersCollection = db.collection("users");
+    tuitionRequestsCollection = db.collection("tuitionRequests");
+    jobsCollection = db.collection("jobs");
+    applicationsCollection = db.collection("applications");
+    hireRequestsCollection = db.collection("hireRequests");
+    notificationTokensCollection = db.collection("notificationTokens"); // NEW: Persistent tokens
 
     // Create indexes for tokens collection
     await notificationTokensCollection.createIndexes([
@@ -2293,75 +2300,6 @@ async function run() {
 app.get("/", (req, res) => {
   res.send("search teacher is live");
 });
-
-// Test notification endpoint
-app.post("/test-notification", async (req, res) => {
-  try {
-    const { city, title, body } = req.body;
-    
-    // Default values if not provided
-    const notificationCity = city || "ঢাকা";
-    const notificationTitle = title || "🔔 Test Notification";
-    const notificationBody = body || "এটি একটি test notification। আপনার notification system কাজ করছে!";
-
-    console.log(`📤 Sending test notification to city: ${notificationCity}`);
-
-    // Get all FCM tokens for the specified city
-    const tokens = await notificationTokensCollection
-      .find({
-        city: notificationCity,
-        userId: { $exists: true, $ne: null },
-        isAnonymous: false
-      })
-      .toArray();
-
-    if (tokens.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: `No active users found in ${notificationCity} with notifications enabled`
-      });
-    }
-
-    console.log(`📱 Found ${tokens.length} devices to notify`);
-
-    const fcmTokens = tokens.map(t => t.fcmToken);
-    const message = {
-      notification: {
-        title: notificationTitle,
-        body: notificationBody,
-      },
-      data: {
-        type: 'test',
-        city: notificationCity,
-        timestamp: new Date().toISOString()
-      },
-      tokens: fcmTokens
-    };
-
-    const response = await admin.messaging().sendEachForMulticast(message);
-
-    console.log(`✅ Test notification sent: ${response.successCount} success, ${response.failureCount} failed`);
-
-    res.json({
-      success: true,
-      message: "Test notification sent successfully",
-      stats: {
-        totalDevices: tokens.length,
-        successCount: response.successCount,
-        failureCount: response.failureCount,
-        city: notificationCity
-      }
-    });
-
-  } catch (error) {
-    console.error("❌ Error sending test notification:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
 app.listen(port, () => {
   console.log(`search teacher is sitting on port ${port}`);
 });
