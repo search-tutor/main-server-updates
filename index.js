@@ -156,121 +156,10 @@ async function run() {
     console.log("✅ Notification tokens collection indexes created");
 
     // ===========================
-    // 🔔 PUSH NOTIFICATION HELPER
+    // 🔔 NOTIFICATION SYSTEM (OneSignal Only)
     // ===========================
-    async function sendPushNotifications(users, job) {
-      try {
-        // Check if Firebase Admin is initialized
-        if (!isFirebaseInitialized) {
-          console.log("⚠️ Push notifications disabled - Firebase Admin not initialized");
-          console.log("💡 Add FIREBASE_SERVICE_ACCOUNT to .env to enable push notifications");
-          return { success: 0, failed: 0, skipped: users.length };
-        }
-
-        if (!users || users.length === 0) {
-          console.log("📭 No users to send notifications to");
-          return { success: 0, failed: 0 };
-        }
-
-        // Filter users who have FCM tokens
-        const usersWithTokens = users.filter(u => u.fcmToken);
-        
-        if (usersWithTokens.length === 0) {
-          console.log("📭 No users with FCM tokens found");
-          return { success: 0, failed: 0 };
-        }
-
-        const tokens = usersWithTokens.map(u => u.fcmToken);
-
-        // Prepare message payload (optimized for all devices)
-        const messagePayload = {
-          notification: {
-            title: `🎓 New Job in ${job.city}!`,
-            body: `${job.title} - Salary: ${job.salary} BDT/month`,
-          },
-          data: {
-            jobId: job.jobId.toString(),
-            jobObjectId: job._id.toString(),
-            city: job.city,
-            salary: job.salary.toString(),
-            click_action: `/job/${job._id}`,
-          },
-          // Android specific options
-          android: {
-            priority: 'high',
-            notification: {
-              sound: 'default',
-              channelId: 'job-notifications',
-              priority: 'high',
-              defaultSound: true,
-              defaultVibrateTimings: true,
-            }
-          },
-          // Apple specific options  
-          apns: {
-            payload: {
-              aps: {
-                sound: 'default',
-                badge: 1,
-              }
-            }
-          },
-          // Web push options
-          webpush: {
-            notification: {
-              icon: '/logo.png',
-              badge: '/logo.png',
-              vibrate: [200, 100, 200],
-              requireInteraction: false, // Auto-dismiss after timeout
-              tag: 'job-notification',
-              renotify: true,
-            },
-            fcmOptions: {
-              link: `/job/${job._id}`
-            }
-          }
-        };
-
-        // Send notifications to each token with device-specific handling
-        let successCount = 0;
-        let failureCount = 0;
-        const failedTokens = [];
-
-        for (let i = 0; i < usersWithTokens.length; i++) {
-          try {
-            const user = usersWithTokens[i];
-            const message = {
-              ...messagePayload,
-              token: user.fcmToken,
-            };
-            
-            await admin.messaging().send(message);
-            successCount++;
-            console.log(`✅ Sent to ${user.deviceType || 'unknown'} device (${i + 1}/${usersWithTokens.length})`);
-          } catch (error) {
-            failureCount++;
-            failedTokens.push(usersWithTokens[i].fcmToken);
-            console.log(`❌ Failed to send to token ${i + 1}:`, error.code || error.message);
-          }
-        }
-        
-        console.log(`✅ Notifications sent: ${successCount} success, ${failureCount} failed`);
-        
-        // Remove invalid tokens from database
-        if (failedTokens.length > 0) {
-          await usersCollection.updateMany(
-            { fcmToken: { $in: failedTokens } },
-            { $unset: { fcmToken: "" } }
-          );
-          console.log(`🗑️ Removed ${failedTokens.length} invalid tokens`);
-        }
-
-        return { success: successCount, failed: failureCount };
-      } catch (error) {
-        console.error("❌ Error sending push notifications:", error);
-        return { success: 0, failed: users.length, error: error.message };
-      }
-    }
+    // Firebase FCM removed - using OneSignal for all notifications
+    // Old sendPushNotifications() function removed
 
     // GET route to fetch all users
     // app.get("/users", async (req, res) => {
@@ -443,192 +332,15 @@ async function run() {
       }
     });
 
-
     // ===========================
-    // 🔔 ANONYMOUS TOKEN REGISTRATION
+    // 🔔 NOTIFICATION SUBSCRIPTIONS
     // ===========================
-    app.post("/notification-tokens/register", async (req, res) => {
-      try {
-        const { fcmToken, deviceId, city, deviceType, userAgent } = req.body;
-
-        if (!fcmToken || !deviceId) {
-          return res.status(400).send({ 
-            success: false, 
-            error: "FCM token and device ID are required" 
-          });
-        }
-
-        // Check if token already exists
-        const existingToken = await notificationTokensCollection.findOne({ fcmToken });
-
-        if (existingToken) {
-          // Update existing token
-          await notificationTokensCollection.updateOne(
-            { fcmToken },
-            { 
-              $set: { 
-                city: city || existingToken.city,
-                deviceType: deviceType || existingToken.deviceType,
-                userAgent: userAgent || existingToken.userAgent,
-                lastActive: new Date(),
-                isActive: true
-              } 
-            }
-          );
-
-          console.log(`✅ Updated anonymous token for device: ${deviceId}`);
-          return res.status(200).send({ 
-            success: true, 
-            message: "Token updated successfully",
-            tokenId: existingToken._id
-          });
-        }
-
-        // Create new anonymous token
-        const newToken = {
-          fcmToken,
-          deviceId,
-          userId: null, // Anonymous - no user linked yet
-          city: city || null,
-          deviceType: deviceType || 'unknown',
-          userAgent: userAgent || null,
-          isAnonymous: true,
-          isActive: true,
-          preferences: {
-            cities: city ? [city] : [],
-            categories: []
-          },
-          createdAt: new Date(),
-          lastActive: new Date()
-        };
-
-        const result = await notificationTokensCollection.insertOne(newToken);
-
-        console.log(`✅ Registered anonymous token for city: ${city || 'unspecified'}`);
-        res.status(201).send({ 
-          success: true, 
-          message: "Anonymous token registered successfully",
-          tokenId: result.insertedId
-        });
-      } catch (error) {
-        console.error("❌ Error registering anonymous token:", error);
-        res.status(500).send({ 
-          success: false, 
-          error: "Failed to register token" 
-        });
-      }
-    });
-
-
+    // 🔔 NOTIFICATION SUBSCRIPTIONS
     // ===========================
-    // 🔔 SAVE FCM TOKEN (LOGIN)
+    
     // ===========================
-    app.post("/users/:uid/fcm-token", async (req, res) => {
-      try {
-        const { uid } = req.params;
-        const { fcmToken, deviceType, userAgent, deviceId } = req.body;
-
-        if (!uid || !fcmToken) {
-          return res.status(400).send({ 
-            success: false, 
-            error: "UID and FCM token are required" 
-          });
-        }
-
-        // Get user info for city
-        const user = await usersCollection.findOne({ uid });
-        if (!user) {
-          return res.status(404).send({ 
-            success: false, 
-            error: "User not found" 
-          });
-        }
-
-        // Update or create token in notificationTokens collection
-        const existingToken = await notificationTokensCollection.findOne({ fcmToken });
-
-        if (existingToken) {
-          // Link existing anonymous token to user
-          await notificationTokensCollection.updateOne(
-            { fcmToken },
-            { 
-              $set: { 
-                userId: uid,
-                city: user.city || existingToken.city,
-                deviceType: deviceType || existingToken.deviceType,
-                userAgent: userAgent || existingToken.userAgent,
-                isAnonymous: false,
-                lastActive: new Date(),
-                isActive: true
-              } 
-            }
-          );
-          console.log(`✅ Linked anonymous token to user: ${uid}`);
-        } else {
-          // Create new token entry
-          await notificationTokensCollection.insertOne({
-            fcmToken,
-            deviceId: deviceId || null,
-            userId: uid,
-            city: user.city,
-            deviceType: deviceType || 'unknown',
-            userAgent: userAgent || null,
-            isAnonymous: false,
-            isActive: true,
-            preferences: {
-              cities: user.city ? [user.city] : [],
-              categories: []
-            },
-            createdAt: new Date(),
-            lastActive: new Date()
-          });
-          console.log(`✅ Created new token for user: ${uid}`);
-        }
-
-        // Also update user collection (backward compatibility)
-        const updateData = {
-          fcmToken, 
-          lastTokenUpdate: new Date(),
-          notificationEnabled: true
-        };
-
-        // Store device info for better targeting
-        if (deviceType) {
-          updateData.deviceType = deviceType;
-        }
-        if (userAgent) {
-          updateData.lastUserAgent = userAgent;
-        }
-
-        const result = await usersCollection.updateOne(
-          { uid },
-          { $set: updateData }
-        );
-
-        if (result.matchedCount === 0) {
-          return res.status(404).send({ 
-            success: false, 
-            error: "User not found" 
-          });
-        }
-
-        console.log(`✅ FCM token saved for user: ${uid} (${deviceType || 'unknown device'})`);
-
-        res.status(200).send({ 
-          success: true, 
-          message: "FCM token saved successfully" 
-        });
-      } catch (error) {
-        console.error("❌ Error saving FCM token:", error);
-        res.status(500).send({ 
-          success: false, 
-          error: "Failed to save FCM token" 
-        });
-      }
-    });
-
+    // OneSignal Subscription API (Primary notification system)
     // ===========================
-    // OneSignal Subscription API
     // ===========================
     app.post("/users/:uid/onesignal-subscription", async (req, res) => {
       try {
@@ -1805,15 +1517,6 @@ async function run() {
             }).catch(err => {
               console.error("❌ OneSignal error:", err);
             });
-
-            // Also send FCM notifications (fallback/backward compatibility)
-            sendPushNotifications(allRecipients, newJob)
-              .then(notifResult => {
-                console.log(`✅ FCM Notification result: ${notifResult.success} sent, ${notifResult.failed} failed`);
-              })
-              .catch(err => {
-                console.error("❌ FCM Notification error:", err);
-              });
           } else {
             console.log(`📭 No users found in ${city} with FCM tokens`);
           }
@@ -2430,7 +2133,7 @@ app.get("/", (req, res) => {
   res.send("search teacher is live");
 });
 
-// Test notification endpoint
+// Test notification endpoint - OneSignal only
 app.post("/test-notification", async (req, res) => {
   try {
     const { city, title, body } = req.body;
@@ -2440,70 +2143,37 @@ app.post("/test-notification", async (req, res) => {
     const notificationTitle = title || "🔔 Test Notification";
     const notificationBody = body || "এটি একটি test notification। আপনার notification system কাজ করছে!";
 
-    console.log(`📤 Sending test notification to city: ${notificationCity}`);
+    console.log(`📤 Sending OneSignal test notification to city: ${notificationCity}`);
 
-    // Get all FCM tokens for the specified city
-    const tokens = await notificationTokensCollection
-      .find({
-        city: notificationCity,
-        userId: { $exists: true, $ne: null },
-        isAnonymous: false
-      })
-      .toArray();
-
-    if (tokens.length === 0) {
-      return res.status(404).json({
+    // Send OneSignal notification
+    const oneSignalResult = await sendOneSignalNotification(
+      [{ field: 'tag', key: 'city', relation: '=', value: notificationCity }],
+      notificationTitle,
+      notificationBody,
+      { type: 'test', city: notificationCity, timestamp: new Date().toISOString() }
+    );
+    
+    if (oneSignalResult.success) {
+      console.log(`✅ OneSignal test sent to ${oneSignalResult.data.recipients || 0} users`);
+      
+      res.json({
+        success: true,
+        message: "Test notification sent successfully via OneSignal",
+        stats: {
+          platform: 'OneSignal',
+          recipients: oneSignalResult.data.recipients || 0,
+          city: notificationCity
+        }
+      });
+    } else {
+      console.error(`❌ OneSignal notification failed:`, oneSignalResult.error);
+      
+      res.status(500).json({
         success: false,
-        message: `No active users found in ${notificationCity} with notifications enabled`
+        message: "Failed to send OneSignal notification",
+        error: oneSignalResult.error
       });
     }
-
-    console.log(`📱 Found ${tokens.length} devices to notify`);
-
-    const fcmTokens = tokens.map(t => t.fcmToken);
-    const message = {
-      notification: {
-        title: notificationTitle,
-        body: notificationBody,
-      },
-      data: {
-        type: 'test',
-        city: notificationCity,
-        timestamp: new Date().toISOString()
-      },
-      tokens: fcmTokens
-    };
-
-    const response = await admin.messaging().sendEachForMulticast(message);
-
-    console.log(`✅ Test notification sent: ${response.successCount} success, ${response.failureCount} failed`);
-
-    // Also send OneSignal test notification
-    try {
-      const oneSignalResult = await sendOneSignalNotification(
-        [{ field: 'tag', key: 'city', relation: '=', value: notificationCity }],
-        notificationTitle,
-        notificationBody,
-        { type: 'test', city: notificationCity, timestamp: new Date().toISOString() }
-      );
-      
-      if (oneSignalResult.success) {
-        console.log(`✅ OneSignal test sent to ${oneSignalResult.data.recipients || 0} users`);
-      }
-    } catch (err) {
-      console.error('❌ OneSignal test failed:', err);
-    }
-
-    res.json({
-      success: true,
-      message: "Test notification sent successfully",
-      stats: {
-        totalDevices: tokens.length,
-        successCount: response.successCount,
-        failureCount: response.failureCount,
-        city: notificationCity
-      }
-    });
 
   } catch (error) {
     console.error("❌ Error sending test notification:", error);
