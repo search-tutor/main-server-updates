@@ -21,6 +21,7 @@
     "firebase-admin": "^13.6.0",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.17.0",
+    "node-fetch": "^3.3.2",
     "vercel": "^41.0.2",
     "web-push": "^3.6.7"
   },

@@ -46,6 +46,50 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// OneSignal Configuration
+const ONESIGNAL_APP_ID = 'a602ac0e-1f7d-4f4b-84dd-6990afc9cd7c';
+const ONESIGNAL_REST_API_KEY = 'os_v2_app_uybkydq7pvhuxbg5ngik7sonpshd7dbnl5seun4palwkbwy624eu7ak6v5amv7btf3fhdqtpdwr5f7d2wyz57pohykliwitdu4u3lii';
+
+// Function to send OneSignal notification
+async function sendOneSignalNotification(filters, heading, content, data = {}) {
+  try {
+    const notificationPayload = {
+      app_id: ONESIGNAL_APP_ID,
+      filters: filters,
+      headings: { en: heading },
+      contents: { en: content },
+      data: data,
+      web_url: data.url || 'https://searchtutorbd.com',
+      chrome_web_icon: 'https://searchtutorbd.com/images/WhatsApp Image 2025-09-09 at 10.14.08 PM.jpeg',
+      firefox_icon: 'https://searchtutorbd.com/images/WhatsApp Image 2025-09-09 at 10.14.08 PM.jpeg',
+      chrome_web_badge: 'https://searchtutorbd.com/images/WhatsApp Image 2025-09-09 at 10.14.08 PM.jpeg',
+    };
+
+    const response = await fetch('https://onesignal.com/api/v1/notifications', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${ONESIGNAL_REST_API_KEY}`
+      },
+      body: JSON.stringify(notificationPayload)
+    });
+
+    const result = await response.json();
+    
+    if (response.ok) {
+      console.log(`✅ OneSignal notification sent successfully`);
+      console.log(`   Recipients: ${result.recipients || 0}`);
+      return { success: true, data: result };
+    } else {
+      console.error(`❌ OneSignal notification failed:`, result);
+      return { success: false, error: result };
+    }
+  } catch (error) {
+    console.error('❌ Error sending OneSignal notification:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 app.post("/jwt", (req, res) => {
   const user = req.body;
 
@@ -578,6 +622,65 @@ async function run() {
         res.status(500).send({ 
           success: false, 
           error: "Failed to save FCM token" 
+        });
+      }
+    });
+
+    // ===========================
+    // OneSignal Subscription API
+    // ===========================
+    app.post("/users/:uid/onesignal-subscription", async (req, res) => {
+      try {
+        const { uid } = req.params;
+        const { playerId, city, deviceType } = req.body;
+
+        if (!uid || !playerId) {
+          return res.status(400).send({ 
+            success: false, 
+            error: "UID and Player ID are required" 
+          });
+        }
+
+        // Get user info
+        const user = await usersCollection.findOne({ uid });
+        if (!user) {
+          return res.status(404).send({ 
+            success: false, 
+            error: "User not found" 
+          });
+        }
+
+        // Save OneSignal subscription
+        const subscriptionData = {
+          playerId,
+          userId: uid,
+          email: user.email,
+          city: city || user.city,
+          deviceType: deviceType || 'unknown',
+          isActive: true,
+          createdAt: new Date(),
+          lastActive: new Date(),
+        };
+
+        // Upsert subscription
+        await notificationTokensCollection.updateOne(
+          { userId: uid, playerId },
+          { $set: subscriptionData },
+          { upsert: true }
+        );
+
+        console.log(`✅ OneSignal subscription saved for user: ${uid}`);
+
+        res.status(200).send({ 
+          success: true, 
+          message: "OneSignal subscription saved successfully",
+          data: subscriptionData
+        });
+      } catch (error) {
+        console.error("❌ Error saving OneSignal subscription:", error);
+        res.status(500).send({ 
+          success: false, 
+          error: "Failed to save OneSignal subscription" 
         });
       }
     });
@@ -1677,13 +1780,38 @@ async function run() {
             // Add the _id to newJob for notification
             newJob._id = result.insertedId;
             
-            // Send notifications (non-blocking)
+            // Send OneSignal notifications to city-tagged users
+            const heading = `নতুন টিউশন: ${className || 'ক্লাস'} - ${subject || 'বিষয়'}`;
+            const content = `${city} এলাকায় নতুন টিউশন পোস্ট হয়েছে। বেতন: ${salary || 'আলোচনাসাপেক্ষে'} টাকা`;
+            
+            sendOneSignalNotification(
+              [{ field: 'tag', key: 'city', relation: '=', value: city }],
+              heading,
+              content,
+              { 
+                url: `https://searchtutorbd.com/job/${result.insertedId}`,
+                jobId: result.insertedId.toString(),
+                city: city,
+                className: className,
+                subject: subject
+              }
+            ).then(oneSignalResult => {
+              if (oneSignalResult.success) {
+                console.log(`✅ OneSignal notifications sent to ${oneSignalResult.data.recipients || 0} users`);
+              } else {
+                console.error(`❌ OneSignal notification failed:`, oneSignalResult.error);
+              }
+            }).catch(err => {
+              console.error("❌ OneSignal error:", err);
+            });
+
+            // Also send FCM notifications (fallback/backward compatibility)
             sendPushNotifications(allRecipients, newJob)
               .then(notifResult => {
-                console.log(`✅ Notification result: ${notifResult.success} sent, ${notifResult.failed} failed`);
+                console.log(`✅ FCM Notification result: ${notifResult.success} sent, ${notifResult.failed} failed`);
               })
               .catch(err => {
-                console.error("❌ Notification error:", err);
+                console.error("❌ FCM Notification error:", err);
               });
           } else {
             console.log(`📭 No users found in ${city} with FCM tokens`);
@@ -2349,6 +2477,22 @@ app.post("/test-notification", async (req, res) => {
 
     console.log(`✅ Test notification sent: ${response.successCount} success, ${response.failureCount} failed`);
 
+    // Also send OneSignal test notification
+    try {
+      const oneSignalResult = await sendOneSignalNotification(
+        [{ field: 'tag', key: 'city', relation: '=', value: notificationCity }],
+        notificationTitle,
+        notificationBody,
+        { type: 'test', city: notificationCity, timestamp: new Date().toISOString() }
+      );
+      
+      if (oneSignalResult.success) {
+        console.log(`✅ OneSignal test sent to ${oneSignalResult.data.recipients || 0} users`);
+      }
+    } catch (err) {
+      console.error('❌ OneSignal test failed:', err);
+    }
+
     res.json({
       success: true,
       message: "Test notification sent successfully",
@@ -2385,6 +2529,49 @@ app.get("/check-notification-status/:userId", async (req, res) => {
     res.json({
       success: true,
       userId: userId,
+      tokensInCollection: tokens.length,
+      tokens: tokens.map(t => ({
+        fcmToken: t.fcmToken.substring(0, 20) + '...',
+        city: t.city,
+        deviceType: t.deviceType,
+        isActive: t.isActive,
+        isAnonymous: t.isAnonymous,
+        createdAt: t.createdAt
+      })),
+      userProfile: user ? {
+        city: user.city,
+        accountType: user.accountType,
+        notificationEnabled: user.notificationEnabled,
+        hasFCMToken: !!user.fcmToken
+      } : null
+    });
+
+  } catch (error) {
+    console.error("❌ Error checking notification status:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get current logged user info (no need for userId in URL)
+app.get("/my-notification-status", verifyJWT, async (req, res) => {
+  try {
+    const userId = req.decoded.uid;
+
+    // Check in notificationTokens collection
+    const tokens = await notificationTokensCollection
+      .find({ userId: userId })
+      .toArray();
+
+    // Check in users collection
+    const user = await usersCollection.findOne({ uid: userId });
+
+    res.json({
+      success: true,
+      userId: userId,
+      userName: user?.name || 'Unknown',
       tokensInCollection: tokens.length,
       tokens: tokens.map(t => ({
         fcmToken: t.fcmToken.substring(0, 20) + '...',
