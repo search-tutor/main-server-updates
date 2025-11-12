@@ -4,7 +4,6 @@ const app = express();
 const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const fetch = require("node-fetch");
 const port = process.env.PORT || 4000;
 
 // Initialize Firebase Admin SDK
@@ -46,50 +45,6 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
-
-// OneSignal Configuration
-const ONESIGNAL_APP_ID = 'a602ac0e-1f7d-4f4b-84dd-6990afc9cd7c';
-const ONESIGNAL_REST_API_KEY = 'os_v2_app_uybkydq7pvhuxbg5ngik7sonpshd7dbnl5seun4palwkbwy624eu7ak6v5amv7btf3fhdqtpdwr5f7d2wyz57pohykliwitdu4u3lii';
-
-// Function to send OneSignal notification
-async function sendOneSignalNotification(filters, heading, content, data = {}) {
-  try {
-    const notificationPayload = {
-      app_id: ONESIGNAL_APP_ID,
-      filters: filters,
-      headings: { en: heading },
-      contents: { en: content },
-      data: data,
-      web_url: data.url || 'https://searchtutorbd.com',
-      chrome_web_icon: 'https://searchtutorbd.com/images/WhatsApp Image 2025-09-09 at 10.14.08 PM.jpeg',
-      firefox_icon: 'https://searchtutorbd.com/images/WhatsApp Image 2025-09-09 at 10.14.08 PM.jpeg',
-      chrome_web_badge: 'https://searchtutorbd.com/images/WhatsApp Image 2025-09-09 at 10.14.08 PM.jpeg',
-    };
-
-    const response = await fetch('https://onesignal.com/api/v1/notifications', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Basic ${ONESIGNAL_REST_API_KEY}`
-      },
-      body: JSON.stringify(notificationPayload)
-    });
-
-    const result = await response.json();
-    
-    if (response.ok) {
-      console.log(`✅ OneSignal notification sent successfully`);
-      console.log(`   Recipients: ${result.recipients || 0}`);
-      return { success: true, data: result };
-    } else {
-      console.error(`❌ OneSignal notification failed:`, result);
-      return { success: false, error: result };
-    }
-  } catch (error) {
-    console.error('❌ Error sending OneSignal notification:', error);
-    return { success: false, error: error.message };
-  }
-}
 
 app.post("/jwt", (req, res) => {
   const user = req.body;
@@ -156,10 +111,121 @@ async function run() {
     console.log("✅ Notification tokens collection indexes created");
 
     // ===========================
-    // 🔔 NOTIFICATION SYSTEM (OneSignal Only)
+    // 🔔 PUSH NOTIFICATION HELPER
     // ===========================
-    // Firebase FCM removed - using OneSignal for all notifications
-    // Old sendPushNotifications() function removed
+    async function sendPushNotifications(users, job) {
+      try {
+        // Check if Firebase Admin is initialized
+        if (!isFirebaseInitialized) {
+          console.log("⚠️ Push notifications disabled - Firebase Admin not initialized");
+          console.log("💡 Add FIREBASE_SERVICE_ACCOUNT to .env to enable push notifications");
+          return { success: 0, failed: 0, skipped: users.length };
+        }
+
+        if (!users || users.length === 0) {
+          console.log("📭 No users to send notifications to");
+          return { success: 0, failed: 0 };
+        }
+
+        // Filter users who have FCM tokens
+        const usersWithTokens = users.filter(u => u.fcmToken);
+        
+        if (usersWithTokens.length === 0) {
+          console.log("📭 No users with FCM tokens found");
+          return { success: 0, failed: 0 };
+        }
+
+        const tokens = usersWithTokens.map(u => u.fcmToken);
+
+        // Prepare message payload (optimized for all devices)
+        const messagePayload = {
+          notification: {
+            title: `🎓 New Job in ${job.city}!`,
+            body: `${job.title} - Salary: ${job.salary} BDT/month`,
+          },
+          data: {
+            jobId: job.jobId.toString(),
+            jobObjectId: job._id.toString(),
+            city: job.city,
+            salary: job.salary.toString(),
+            click_action: `/job/${job._id}`,
+          },
+          // Android specific options
+          android: {
+            priority: 'high',
+            notification: {
+              sound: 'default',
+              channelId: 'job-notifications',
+              priority: 'high',
+              defaultSound: true,
+              defaultVibrateTimings: true,
+            }
+          },
+          // Apple specific options  
+          apns: {
+            payload: {
+              aps: {
+                sound: 'default',
+                badge: 1,
+              }
+            }
+          },
+          // Web push options
+          webpush: {
+            notification: {
+              icon: '/logo.png',
+              badge: '/logo.png',
+              vibrate: [200, 100, 200],
+              requireInteraction: false, // Auto-dismiss after timeout
+              tag: 'job-notification',
+              renotify: true,
+            },
+            fcmOptions: {
+              link: `/job/${job._id}`
+            }
+          }
+        };
+
+        // Send notifications to each token with device-specific handling
+        let successCount = 0;
+        let failureCount = 0;
+        const failedTokens = [];
+
+        for (let i = 0; i < usersWithTokens.length; i++) {
+          try {
+            const user = usersWithTokens[i];
+            const message = {
+              ...messagePayload,
+              token: user.fcmToken,
+            };
+            
+            await admin.messaging().send(message);
+            successCount++;
+            console.log(`✅ Sent to ${user.deviceType || 'unknown'} device (${i + 1}/${usersWithTokens.length})`);
+          } catch (error) {
+            failureCount++;
+            failedTokens.push(usersWithTokens[i].fcmToken);
+            console.log(`❌ Failed to send to token ${i + 1}:`, error.code || error.message);
+          }
+        }
+        
+        console.log(`✅ Notifications sent: ${successCount} success, ${failureCount} failed`);
+        
+        // Remove invalid tokens from database
+        if (failedTokens.length > 0) {
+          await usersCollection.updateMany(
+            { fcmToken: { $in: failedTokens } },
+            { $unset: { fcmToken: "" } }
+          );
+          console.log(`🗑️ Removed ${failedTokens.length} invalid tokens`);
+        }
+
+        return { success: successCount, failed: failureCount };
+      } catch (error) {
+        console.error("❌ Error sending push notifications:", error);
+        return { success: 0, failed: users.length, error: error.message };
+      }
+    }
 
     // GET route to fetch all users
     // app.get("/users", async (req, res) => {
@@ -332,29 +398,99 @@ async function run() {
       }
     });
 
-    // ===========================
-    // 🔔 NOTIFICATION SUBSCRIPTIONS
-    // ===========================
-    // 🔔 NOTIFICATION SUBSCRIPTIONS
-    // ===========================
-    
-    // ===========================
-    // OneSignal Subscription API (Primary notification system)
-    // ===========================
-    // ===========================
-    app.post("/users/:uid/onesignal-subscription", async (req, res) => {
-      try {
-        const { uid } = req.params;
-        const { playerId, city, deviceType } = req.body;
 
-        if (!uid || !playerId) {
+    // ===========================
+    // 🔔 ANONYMOUS TOKEN REGISTRATION
+    // ===========================
+    app.post("/notification-tokens/register", async (req, res) => {
+      try {
+        const { fcmToken, deviceId, city, deviceType, userAgent } = req.body;
+
+        if (!fcmToken || !deviceId) {
           return res.status(400).send({ 
             success: false, 
-            error: "UID and Player ID are required" 
+            error: "FCM token and device ID are required" 
           });
         }
 
-        // Get user info
+        // Check if token already exists
+        const existingToken = await notificationTokensCollection.findOne({ fcmToken });
+
+        if (existingToken) {
+          // Update existing token
+          await notificationTokensCollection.updateOne(
+            { fcmToken },
+            { 
+              $set: { 
+                city: city || existingToken.city,
+                deviceType: deviceType || existingToken.deviceType,
+                userAgent: userAgent || existingToken.userAgent,
+                lastActive: new Date(),
+                isActive: true
+              } 
+            }
+          );
+
+          console.log(`✅ Updated anonymous token for device: ${deviceId}`);
+          return res.status(200).send({ 
+            success: true, 
+            message: "Token updated successfully",
+            tokenId: existingToken._id
+          });
+        }
+
+        // Create new anonymous token
+        const newToken = {
+          fcmToken,
+          deviceId,
+          userId: null, // Anonymous - no user linked yet
+          city: city || null,
+          deviceType: deviceType || 'unknown',
+          userAgent: userAgent || null,
+          isAnonymous: true,
+          isActive: true,
+          preferences: {
+            cities: city ? [city] : [],
+            categories: []
+          },
+          createdAt: new Date(),
+          lastActive: new Date()
+        };
+
+        const result = await notificationTokensCollection.insertOne(newToken);
+
+        console.log(`✅ Registered anonymous token for city: ${city || 'unspecified'}`);
+        res.status(201).send({ 
+          success: true, 
+          message: "Anonymous token registered successfully",
+          tokenId: result.insertedId
+        });
+      } catch (error) {
+        console.error("❌ Error registering anonymous token:", error);
+        res.status(500).send({ 
+          success: false, 
+          error: "Failed to register token" 
+        });
+      }
+    });
+
+
+    // ===========================
+    // 🔔 SAVE FCM TOKEN (LOGIN)
+    // ===========================
+    app.post("/users/:uid/fcm-token", async (req, res) => {
+      try {
+        const { uid } = req.params;
+        const { fcmToken, deviceType, userAgent, deviceId } = req.body;
+
+        if (!uid || !fcmToken) {
+          return res.status(400).send({ 
+            success: false, 
+            error: "UID and FCM token are required" 
+          });
+        }
+
+        // Get user info for city
         const user = await usersCollection.findOne({ uid });
         if (!user) {
           return res.status(404).send({ 
@@ -363,37 +499,85 @@ async function run() {
           });
         }
 
-        // Save OneSignal subscription
-        const subscriptionData = {
-          playerId,
-          userId: uid,
-          email: user.email,
-          city: city || user.city,
-          deviceType: deviceType || 'unknown',
-          isActive: true,
-          createdAt: new Date(),
-          lastActive: new Date(),
+        // Update or create token in notificationTokens collection
+        const existingToken = await notificationTokensCollection.findOne({ fcmToken });
+
+        if (existingToken) {
+          // Link existing anonymous token to user
+          await notificationTokensCollection.updateOne(
+            { fcmToken },
+            { 
+              $set: { 
+                userId: uid,
+                city: user.city || existingToken.city,
+                deviceType: deviceType || existingToken.deviceType,
+                userAgent: userAgent || existingToken.userAgent,
+                isAnonymous: false,
+                lastActive: new Date(),
+                isActive: true
+              } 
+            }
+          );
+          console.log(`✅ Linked anonymous token to user: ${uid}`);
+        } else {
+          // Create new token entry
+          await notificationTokensCollection.insertOne({
+            fcmToken,
+            deviceId: deviceId || null,
+            userId: uid,
+            city: user.city,
+            deviceType: deviceType || 'unknown',
+            userAgent: userAgent || null,
+            isAnonymous: false,
+            isActive: true,
+            preferences: {
+              cities: user.city ? [user.city] : [],
+              categories: []
+            },
+            createdAt: new Date(),
+            lastActive: new Date()
+          });
+          console.log(`✅ Created new token for user: ${uid}`);
+        }
+
+        // Also update user collection (backward compatibility)
+        const updateData = {
+          fcmToken, 
+          lastTokenUpdate: new Date(),
+          notificationEnabled: true
         };
 
-        // Upsert subscription
-        await notificationTokensCollection.updateOne(
-          { userId: uid, playerId },
-          { $set: subscriptionData },
-          { upsert: true }
+        // Store device info for better targeting
+        if (deviceType) {
+          updateData.deviceType = deviceType;
+        }
+        if (userAgent) {
+          updateData.lastUserAgent = userAgent;
+        }
+
+        const result = await usersCollection.updateOne(
+          { uid },
+          { $set: updateData }
         );
 
-        console.log(`✅ OneSignal subscription saved for user: ${uid}`);
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ 
+            success: false, 
+            error: "User not found" 
+          });
+        }
+
+        console.log(`✅ FCM token saved for user: ${uid} (${deviceType || 'unknown device'})`);
 
         res.status(200).send({ 
           success: true, 
-          message: "OneSignal subscription saved successfully",
-          data: subscriptionData
+          message: "FCM token saved successfully" 
         });
       } catch (error) {
-        console.error("❌ Error saving OneSignal subscription:", error);
+        console.error("❌ Error saving FCM token:", error);
         res.status(500).send({ 
           success: false, 
-          error: "Failed to save OneSignal subscription" 
+          error: "Failed to save FCM token" 
         });
       }
     });
@@ -1493,30 +1677,14 @@ async function run() {
             // Add the _id to newJob for notification
             newJob._id = result.insertedId;
             
-            // Send OneSignal notifications to city-tagged users
-            const heading = `নতুন টিউশন: ${className || 'ক্লাস'} - ${subject || 'বিষয়'}`;
-            const content = `${city} এলাকায় নতুন টিউশন পোস্ট হয়েছে। বেতন: ${salary || 'আলোচনাসাপেক্ষে'} টাকা`;
-            
-            sendOneSignalNotification(
-              [{ field: 'tag', key: 'city', relation: '=', value: city }],
-              heading,
-              content,
-              { 
-                url: `https://searchtutorbd.com/job/${result.insertedId}`,
-                jobId: result.insertedId.toString(),
-                city: city,
-                className: className,
-                subject: subject
-              }
-            ).then(oneSignalResult => {
-              if (oneSignalResult.success) {
-                console.log(`✅ OneSignal notifications sent to ${oneSignalResult.data.recipients || 0} users`);
-              } else {
-                console.error(`❌ OneSignal notification failed:`, oneSignalResult.error);
-              }
-            }).catch(err => {
-              console.error("❌ OneSignal error:", err);
-            });
+            // Send notifications (non-blocking)
+            sendPushNotifications(allRecipients, newJob)
+              .then(notifResult => {
+                console.log(`✅ Notification result: ${notifResult.success} sent, ${notifResult.failed} failed`);
+              })
+              .catch(err => {
+                console.error("❌ Notification error:", err);
+              });
           } else {
             console.log(`📭 No users found in ${city} with FCM tokens`);
           }
@@ -2133,7 +2301,7 @@ app.get("/", (req, res) => {
   res.send("search teacher is live");
 });
 
-// Test notification endpoint - OneSignal only
+// Test notification endpoint
 app.post("/test-notification", async (req, res) => {
   try {
     const { city, title, body } = req.body;
@@ -2143,37 +2311,54 @@ app.post("/test-notification", async (req, res) => {
     const notificationTitle = title || "🔔 Test Notification";
     const notificationBody = body || "এটি একটি test notification। আপনার notification system কাজ করছে!";
 
-    console.log(`📤 Sending OneSignal test notification to city: ${notificationCity}`);
+    console.log(`📤 Sending test notification to city: ${notificationCity}`);
 
-    // Send OneSignal notification
-    const oneSignalResult = await sendOneSignalNotification(
-      [{ field: 'tag', key: 'city', relation: '=', value: notificationCity }],
-      notificationTitle,
-      notificationBody,
-      { type: 'test', city: notificationCity, timestamp: new Date().toISOString() }
-    );
-    
-    if (oneSignalResult.success) {
-      console.log(`✅ OneSignal test sent to ${oneSignalResult.data.recipients || 0} users`);
-      
-      res.json({
-        success: true,
-        message: "Test notification sent successfully via OneSignal",
-        stats: {
-          platform: 'OneSignal',
-          recipients: oneSignalResult.data.recipients || 0,
-          city: notificationCity
-        }
-      });
-    } else {
-      console.error(`❌ OneSignal notification failed:`, oneSignalResult.error);
-      
-      res.status(500).json({
+    // Get all FCM tokens for the specified city
+    const tokens = await notificationTokensCollection
+      .find({
+        city: notificationCity,
+        userId: { $exists: true, $ne: null },
+        isAnonymous: false
+      })
+      .toArray();
+
+    if (tokens.length === 0) {
+      return res.status(404).json({
         success: false,
-        message: "Failed to send OneSignal notification",
-        error: oneSignalResult.error
+        message: `No active users found in ${notificationCity} with notifications enabled`
       });
     }
+
+    console.log(`📱 Found ${tokens.length} devices to notify`);
+
+    const fcmTokens = tokens.map(t => t.fcmToken);
+    const message = {
+      notification: {
+        title: notificationTitle,
+        body: notificationBody,
+      },
+      data: {
+        type: 'test',
+        city: notificationCity,
+        timestamp: new Date().toISOString()
+      },
+      tokens: fcmTokens
+    };
+
+    const response = await admin.messaging().sendEachForMulticast(message);
+
+    console.log(`✅ Test notification sent: ${response.successCount} success, ${response.failureCount} failed`);
+
+    res.json({
+      success: true,
+      message: "Test notification sent successfully",
+      stats: {
+        totalDevices: tokens.length,
+        successCount: response.successCount,
+        failureCount: response.failureCount,
+        city: notificationCity
+      }
+    });
 
   } catch (error) {
     console.error("❌ Error sending test notification:", error);
@@ -2225,50 +2410,6 @@ app.get("/check-notification-status/:userId", async (req, res) => {
     });
   }
 });
-
-// Commented out - requires verifyJWT middleware
-// // Get current logged user info (no need for userId in URL)
-// app.get("/my-notification-status", verifyJWT, async (req, res) => {
-//   try {
-//     const userId = req.decoded.uid;
-
-//     // Check in notificationTokens collection
-//     const tokens = await notificationTokensCollection
-//       .find({ userId: userId })
-//       .toArray();
-
-//     // Check in users collection
-//     const user = await usersCollection.findOne({ uid: userId });
-
-//     res.json({
-//       success: true,
-//       userId: userId,
-//       userName: user?.name || 'Unknown',
-//       tokensInCollection: tokens.length,
-//       tokens: tokens.map(t => ({
-//         fcmToken: t.fcmToken.substring(0, 20) + '...',
-//         city: t.city,
-//         deviceType: t.deviceType,
-//         isActive: t.isActive,
-//         isAnonymous: t.isAnonymous,
-//         createdAt: t.createdAt
-//       })),
-//       userProfile: user ? {
-//         city: user.city,
-//         accountType: user.accountType,
-//         notificationEnabled: user.notificationEnabled,
-//         hasFCMToken: !!user.fcmToken
-//       } : null
-//     });
-
-//   } catch (error) {
-//     console.error("❌ Error checking notification status:", error);
-//     res.status(500).json({
-//       success: false,
-//       error: error.message
-//     });
-//   }
-// });
 
 app.listen(port, () => {
   console.log(`search teacher is sitting on port ${port}`);
